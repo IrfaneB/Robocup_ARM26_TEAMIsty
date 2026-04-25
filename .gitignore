@@ -1,0 +1,9 @@
+# MATLAB et Simulink : fichiers temporaires à ignorer
+slprj/
+resources/project/
+**/*.asv
+**/*.slxc
+**/*.mex*
+*.log
+cat32/
+cat64/
