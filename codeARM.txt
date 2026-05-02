@@ -1,98 +1,91 @@
-%% ========================================================
-%% RÉCAPITULATIF TECHNIQUE : PROJET UR5e - TEAM ISTY 2026
-%% DATE : 02 Mai 2026 | ETAT : Cycle d'endurance (10 min)
-%% ========================================================
-
-% --- STRUCTURE DU PROJET (GITHUB) ---
-% /project-root
-% │── main.m                <- Fonction de contrôle (Code ci-dessous)
-% │── model_UR5e.slx        <- Fichier Simulink principal
-% │── /assets
-% │   └── ur5e_robot.urdf   <- Modèle mécanique du bras
-% │   └── *.stl             <- Fichiers Mesh pour la 3D
-% └── /toolbox              <- Dépendances (Robotics, Vision, Image Proc)
-
-%% --- CODE DE LA FONCTION PRINCIPALE (main.m) ---
 function [gripperStatus, currentConfig, stop] = main(rgbImage, depthImage, camPose, targetGrasped)
-    % Initialisation des variables persistantes
-    stop = false;          
-    gripperStatus = 0;     
-    persistent state delay lastConfig startTime;
 
-    if isempty(state), state = 1; end
-    if isempty(delay), delay = 1; end
-    if isempty(lastConfig), lastConfig = [0; -1.57; 1.57; -1.57; -1.57; 0]; end
-    if isempty(startTime), startTime = tic; end
+%% 1. INITIALISATION
+stop = false;          
+gripperStatus = 0;     
+persistent state delay lastConfig;
 
-    % 1. Sécurité : Test d'endurance 10 minutes
-    if toc(startTime) > 600
-        stop = true;
-    end
-
-    % 2. Perception (Red=Can, Green/Blue=Bins)
-    redMask = false; anyBinMask = false; distToTarget = 999;
-    imgSize = size(rgbImage);
-    if numel(imgSize) == 3 && imgSize(3) == 3
-        redMask = (rgbImage(:,:,1) > 150) & (rgbImage(:,:,2) < 100);
-        greenBin = (rgbImage(:,:,2) > 120) & (rgbImage(:,:,1) < 100);
-        blueBin = (rgbImage(:,:,3) > 120) & (rgbImage(:,:,1) < 100);
-        anyBinMask = greenBin | blueBin;
-        
-        % Analyse profondeur (Zone centrale)
-        centerDepth = depthImage(200:300, 300:340); 
-        distToTarget = min(centerDepth(:)); 
-    end
-
-    % 3. Paramétrage des poses (Angles validés ISTY)
-    lookConfig     = [0; -1.1; 1.9; -2.3; -1.57; 0];    % Observation
-    safePickConfig = [0; -0.95; 2.0; -2.5; -1.57; 0];   % Approche canette
-    dropConfig     = [1.70; -1.1; 1.5; -1.8; -1.57; 0]; % Alignement bac (1.70 rad)
-
-    % 4. Machine à États (Cycle Continu)
-    if state == 1 % SCAN
-        targetGoal = lookConfig;
-        if any(redMask(:)), state = 2; delay = 1; end
-
-    elseif state == 2 % APPROCHE (Sécurité distToTarget ou Time-out)
-        targetGoal = safePickConfig;
-        if distToTarget < 0.18 || delay > 150, state = 3; delay = 1; end
-
-    elseif state == 3 % SAISIE
-        targetGoal = lastConfig; 
-        gripperStatus = 1; 
-        if targetGrasped || delay > 80, state = 4; delay = 1; end
-
-    elseif state == 4 % TRANSPORT
-        targetGoal = dropConfig;
-        gripperStatus = 1; 
-        distToGoal = norm(targetGoal - lastConfig);
-        if distToGoal < 0.1 || any(anyBinMask(:)) || delay > 400
-            state = 5; delay = 1;
-        end
-
-    elseif state == 5 % LÂCHER
-        targetGoal = dropConfig;
-        gripperStatus = 0; 
-        if delay > 100, state = 6; delay = 1; end
-        
-    else % RESET & RE-BOUCLAGE
-        targetGoal = lookConfig;
-        if norm(targetGoal - lastConfig) < 0.1 || delay > 150
-            state = 1; delay = 1;
-        end
-    end
-
-    % 5. Lissage de trajectoire (Interpolation 3%)
-    currentConfig = lastConfig + 0.03 * (targetGoal - lastConfig);
-    lastConfig = currentConfig;
-    delay = delay + 1;
+if isempty(state), state = 1; end
+if isempty(delay), delay = 1; end
+if isempty(lastConfig)
+    lastConfig = [0; -1.57; 1.57; -1.57; -1.57; 0]; 
 end
 
-%% ========================================================
-%% BUGS RESTANTS & TODO LIST
-%% ========================================================
-% 1. [PERCEPTION] : distToTarget renvoie parfois 999 si la canette est hors champ central.
-% 2. [LOGIQUE] : Le robot ne différencie pas encore Rouge->Vert et Rouge->Bleu.
-% 3. [STABILITÉ] : Vérifier pourquoi le bras freeze parfois après l'approche (État 2).
-% 4. [PERF] : Optimiser le lissage (0.03) pour réduire le temps de cycle.
-% ========================================================
+%% 2. PERCEPTION MULTI-CIBLES (Canette et Poubelle)
+redMask = false;
+binMask = false; % Pour détecter le bac vert
+distToTarget = 999; 
+
+imgSize = size(rgbImage);
+if numel(imgSize) == 3 && imgSize(3) == 3
+    % Détection canette (Rouge)
+    redMask = (rgbImage(:,:,1) > 150) & (rgbImage(:,:,2) < 100);
+    
+    % Détection poubelle (Vert) - On cherche une grande zone verte
+    binMask = (rgbImage(:,:,2) > 120) & (rgbImage(:,:,1) < 100);
+    
+    % Distance de sécurité
+    centerDepth = depthImage(230:250, 310:330); 
+    distToTarget = min(centerDepth(:)); 
+end
+
+%% 3. POSITIONS
+lookConfig = [0; -1.1; 1.9; -2.3; -1.57; 0]; 
+safePickConfig = [0; -0.95; 2.0; -2.5; -1.57; 0]; 
+% Position théorique du bac
+dropConfig = [1.57; -1.0; 1.4; -1.8; -1.57; 0]; 
+
+%% 4. MACHINE À ÉTATS
+if state == 1 % SCAN CANETTE
+    targetGoal = lookConfig;
+    if any(redMask(:)) || delay > 150
+        state = 2; delay = 1;
+    end
+
+elseif state == 2 % APPROCHE & SAISIE
+    targetGoal = safePickConfig;
+    if distToTarget < 0.15 || delay > 120
+        state = 3; delay = 1;
+    end
+
+elseif state == 3 % FERMER PINCE
+    targetGoal = lastConfig; 
+    gripperStatus = 1; 
+    if targetGrasped || delay > 60
+        state = 4; delay = 1;
+    end
+
+elseif state == 4 % DÉPLACEMENT & VÉRIFICATION POUBELLE
+    targetGoal = dropConfig;
+    gripperStatus = 1; % Garder l'objet !
+    
+    % Calcul de l'arrivée
+    distToGoal = norm(targetGoal - lastConfig);
+    
+    % DOUBLE VÉRIFICATION : 
+    % 1. Est-ce que je suis proche de la cible ?
+    % 2. Est-ce que mes yeux voient le bac vert (binMask) ?
+    if distToGoal < 0.05 && any(binMask(:))
+        state = 5; delay = 1;
+    elseif delay > 300 % Sécurité si on ne voit jamais le vert
+        state = 5; delay = 1;
+    end
+
+elseif state == 5 % LÂCHER PRÉCIS
+    targetGoal = dropConfig;
+    gripperStatus = 0; % OUVRIR
+    if delay > 80
+        state = 6; delay = 1;
+    end
+    
+else % RETOUR ET FIN
+    targetGoal = [0; -1.57; 1.57; -1.57; -1.57; 0];
+    if delay > 150, stop = true; end
+end
+
+%% 5. LISSAGE
+currentConfig = lastConfig + 0.02 * (targetGoal - lastConfig);
+lastConfig = currentConfig;
+delay = delay + 1;
+
+end
